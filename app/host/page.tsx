@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { socket } from "../lib/socket";
 import SimplePeer from "simple-peer";
 import { storage } from "../../lib/firebase";
-import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
+import { ref, uploadBytesResumable, getDownloadURL, listAll, StorageReference, getMetadata } from "firebase/storage";
 
 type Client = {
     id: string;
@@ -18,6 +18,8 @@ export default function HostPage() {
     const [clients, setClients] = useState<Client[]>([]);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [isUploading, setIsUploading] = useState(false);
+    const [recordings, setRecordings] = useState<{ name: string; ref: StorageReference; timeCreated: string }[]>([]);
+    const [playingUrl, setPlayingUrl] = useState<string | null>(null);
     const peersRef = useRef<Map<string, SimplePeer>>(new Map());
     const audioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -202,6 +204,67 @@ export default function HostPage() {
         }
     };
 
+    useEffect(() => {
+        if (!isLive) {
+            fetchRecordings();
+        }
+    }, [isLive]);
+
+    const fetchRecordings = async () => {
+        try {
+            const listRef = ref(storage, "processed-recordings");
+            const res = await listAll(listRef);
+
+            const filePromises = res.items.map(async (item) => {
+                const metadata = await getMetadata(item);
+                return {
+                    name: item.name,
+                    ref: item,
+                    timeCreated: metadata.timeCreated,
+                };
+            });
+
+            const fileList = await Promise.all(filePromises);
+            // Sort by newness
+            fileList.sort((a, b) => new Date(b.timeCreated).getTime() - new Date(a.timeCreated).getTime());
+
+            setRecordings(fileList);
+        } catch (error) {
+            console.error("Error fetching recordings:", error);
+        }
+    };
+
+    const playRecording = async (fileRef: StorageReference) => {
+        try {
+            const url = await getDownloadURL(fileRef);
+            setPlayingUrl(url);
+        } catch (error) {
+            console.error("Error getting download URL:", error);
+            alert("Could not play audio. File might be processing.");
+        }
+    };
+
+    const downloadRecording = async (fileRef: StorageReference, filename: string) => {
+        try {
+            const url = await getDownloadURL(fileRef);
+            // Fetch as blob to force download
+            const response = await fetch(url);
+            const blob = await response.blob();
+            const downloadUrl = window.URL.createObjectURL(blob);
+
+            const a = document.createElement('a');
+            a.href = downloadUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(downloadUrl);
+        } catch (error) {
+            console.error("Error downloading file:", error);
+            alert("Could not download file.");
+        }
+    };
+
     return (
         <div className="min-h-screen p-8 font-sans bg-gray-900 text-white">
             <header className="mb-8 flex justify-between items-center">
@@ -260,6 +323,53 @@ export default function HostPage() {
                         {clients.length === 0 && <p className="text-gray-500">No clients waiting.</p>}
                     </div>
                 </section>
+
+                {!isLive && (
+                    <section className="col-span-1 md:col-span-2 bg-gray-800 p-6 rounded-lg">
+                        <h2 className="text-xl mb-4 text-gray-400">Recorded Archives</h2>
+
+                        {playingUrl && (
+                            <div className="mb-6 bg-gray-900 p-4 rounded">
+                                <p className="text-sm text-gray-400 mb-2">Now Playing</p>
+                                <audio controls autoPlay src={playingUrl} className="w-full" />
+                            </div>
+                        )}
+
+                        <div className="space-y-2">
+                            {recordings.length === 0 && <p className="text-gray-500">No recordings found.</p>}
+                            {recordings.map((file) => (
+                                <div key={file.name} className="flex items-center justify-between bg-gray-700 p-4 rounded hover:bg-gray-650 transition">
+                                    <div className="flex flex-col overflow-hidden mr-4">
+                                        <span className="font-mono text-sm truncate">{file.name}</span>
+                                        <span className="text-xs text-gray-400">
+                                            {new Date(file.timeCreated).toLocaleString()}
+                                        </span>
+                                    </div>
+                                    <div className="flex gap-2 shrink-0">
+                                        <button
+                                            onClick={() => playRecording(file.ref)}
+                                            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm font-bold"
+                                        >
+                                            Play
+                                        </button>
+                                        <button
+                                            onClick={() => downloadRecording(file.ref, file.name)}
+                                            className="px-4 py-2 bg-green-600 hover:bg-green-500 rounded text-sm font-bold"
+                                        >
+                                            Download
+                                        </button>
+                                        <button
+                                            onClick={() => alert("Transcription coming soon!")}
+                                            className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded text-sm font-bold opacity-50 cursor-not-allowed"
+                                        >
+                                            Transcribe
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </section>
+                )}
             </main>
         </div>
     );
